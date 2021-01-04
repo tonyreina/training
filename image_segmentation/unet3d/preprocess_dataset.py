@@ -7,13 +7,15 @@ import torch
 from torch.nn.functional import interpolate
 
 
-EXCLUDED_CASES = [23, 68, 125, 133, 15, 37]
+#EXCLUDED_CASES = [23, 68, 125, 133, 15, 37]
+EXCLUDED_CASES = []
 MAX_ID = 210
 MEAN_VAL = 101.0
 STDDEV_VAL = 76.9
 MIN_CLIP_VAL = -79.0
 MAX_CLIP_VAL = 304.0
 TARGET_SPACING = [1.6, 1.0, 1.0]
+TARGET_SHAPE = [128, 128, 128]
 
 
 class Stats:
@@ -61,6 +63,7 @@ class Preprocessor:
                 continue
             image, label, image_spacings = self.load_pair(case)
             image, label = self.preprocess_case(image, label, image_spacings)
+            image, label = self.pad_to_min_shape(image, label)
             self.save(image, label, case)
         print(self.stats.get_string())
 
@@ -68,6 +71,14 @@ class Preprocessor:
         image, label = self.resample3d(image, label, image_spacings)
         image = self.normalize_intensity(image.copy())
         return image, label
+
+    @staticmethod
+    def pad_to_min_shape(image, label):
+        current_shape = image.shape[1:]
+        bounds = [max(0, TARGET_SHAPE[i] - current_shape[i]) for i in range(3)]
+        paddings = [(0, 0)]
+        paddings.extend([(bounds[i] // 2, bounds[i] - bounds[i] // 2) for i in range(3)])
+        return np.pad(image, paddings, mode="edge"), np.pad(label, paddings, mode="edge")
 
     def load_pair(self, case: str):
         image = nibabel.load(os.path.join(self.data_dir, case, "imaging.nii.gz"))
