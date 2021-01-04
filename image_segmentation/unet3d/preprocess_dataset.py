@@ -7,8 +7,8 @@ import torch
 from torch.nn.functional import interpolate
 
 
-#EXCLUDED_CASES = [23, 68, 125, 133, 15, 37]
-EXCLUDED_CASES = []
+EXCLUDED_CASES = [23, 68, 125, 133, 15, 37]
+#EXCLUDED_CASES = []
 MAX_ID = 210
 MEAN_VAL = 101.0
 STDDEV_VAL = 76.9
