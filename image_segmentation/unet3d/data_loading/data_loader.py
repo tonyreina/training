@@ -1,138 +1,110 @@
-import random
+import os
+import glob
+from typing import Tuple
 
-import monai.transforms as transforms
 import numpy as np
-from scipy import ndimage
-from torch.utils.data import Dataset
+from sklearn.model_selection import KFold
+import torch
+from torch.utils.data import Dataset, DataLoader
+
+from data_loading.dali_loader import get_dali_loader
 
 
-def get_train_transforms(**kwargs):
-    rand_flip = RandFlip()
-    rand_smooth = transforms.RandGaussianSmoothd(keys=["image"], prob=0.1)
-    rand_noise = transforms.RandGaussianNoised(keys=["image"], std=0.1, prob=0.1)
-    rand_scale = transforms.RandScaleIntensityd(keys=["image"], factors=0.3, prob=0.1)
-    mode = "trilinear"
-    rand_zoom = transforms.RandZoomd(
-        keys=["image", "label"], max_zoom=1.2, mode=(mode, "nearest"), align_corners=(True, None)
-    )
-    rand_rotate = transforms.RandRotated(keys=["image", "label"], prob=0.1, mode=["bilinear", "nearest"],
-                                         range_x=15.0, range_y=15.0, range_z=15.0,
-                                         keep_size=True, dtype=(np.float32, np.uint8))
-    cast = transforms.CastToTyped(keys=["image", "label"], dtype=(np.float32, np.uint8))
-    train_transforms = transforms.Compose([rand_flip, rand_rotate, rand_zoom, cast, rand_noise, rand_smooth, rand_scale])
-    train_transforms.set_random_state(seed=kwargs["seed"])
-    return train_transforms
+def cross_validation(arr: np.ndarray, fold_idx: int, n_folds: int) -> Tuple[np.array, np.array]:
+    """ Split data into folds for training and evaluation
+    :param arr: Collection items to split
+    :param fold_idx: Index of crossvalidation fold
+    :param n_folds: Total number of folds
+    :return: Train and Evaluation folds
+    """
+    if fold_idx < 0 or fold_idx >= n_folds:
+        raise ValueError('Fold index has to be [0, n_folds). Received index {} for {} folds'.format(fold_idx, n_folds))
+    _folders = np.array_split(arr, n_folds)
+    return np.concatenate(_folders[:fold_idx] + _folders[fold_idx + 1:]), _folders[fold_idx]
 
 
-def get_data(data, training=True):
-    img_key, lbl_key = ("img_train", "label_train") if training else ("img_val", "label_val")
-    return data[img_key], data[lbl_key]
+def list_files_with_pattern(path, files_pattern):
+    data = sorted(glob.glob(os.path.join(path, files_pattern)))
+    assert len(data) > 0, f"Found no data at {path}"
+    return data
 
 
-class MSDTrain(Dataset):
-    def __init__(self, **kwargs):
-        self.images, self.labels = get_data(data=kwargs["data"])
-        self.train_transforms = get_train_transforms(cascade=False, **kwargs)
-        patch_size, oversampling = kwargs["patch_size"], kwargs["oversampling"]
-        self.rand_crop = RandBalancedCrop(patch_size=patch_size, oversampling=oversampling)
-        self.pad = transforms.SpatialPadd(["image", "label"], patch_size, mode="reflect")
-
-    def __len__(self):
-        return len(self.images)
-
-    def __getitem__(self, idx):
-        data = {"image": np.load(self.images[idx]), "label": np.load(self.labels[idx])}
-        data = self.pad(data)
-        data = self.rand_crop(data)
-        return self.train_transforms(data)
+def get_data_split(path: str, fold: int, num_folds: int) -> Tuple[list, list, list, list]:
+    imgs = list_files_with_pattern(path, "*_x.npy")
+    lbls = list_files_with_pattern(path, "*_y.npy")
+    assert len(imgs) == len(lbls), f"Found {len(imgs)} volumes but {len(lbls)} corresponding masks"
+    train_imgs, val_imgs = cross_validation(np.array(imgs), fold_idx=fold, n_folds=num_folds)
+    train_labels = np.array([f.replace("_x", "_y") for f in train_imgs])
+    val_labels = np.array([f.replace("_x", "_y") for f in val_imgs])
+    print("Found {} files. Training set: {}. Validation set: {}.".format(len(imgs), len(train_imgs), len(val_imgs)))
+    return train_imgs.tolist(), train_labels.tolist(), val_imgs.tolist(), val_labels.tolist()
 
 
-class MSDVal(Dataset):
-    def __init__(self, **kwargs):
-        self.images, self.labels = get_data(data=kwargs["data"], training=False)
-
-    def __len__(self):
-        return len(self.images)
-
-    def __getitem__(self, idx):
-        return {"image": np.load(self.images[idx]), "label": np.load(self.labels[idx]), "name": self.labels[idx]}
+def load_data(path, files_pattern):
+    data = sorted(glob.glob(os.path.join(path, files_pattern)))
+    assert len(data) > 0, f"Found no data at {path}"
+    return data
 
 
-class RandFlip(transforms.MapTransform):
-    def __init__(self):
-        self.axis = [1, 2, 3]
-        self.prob = 1 / len(self.axis)
-
-    def flip(self, data, axis):
-        data["image"] = np.flip(data["image"], axis=axis).copy()
-        data["label"] = np.flip(data["label"], axis=axis).copy()
-        return data
-
-    def __call__(self, data):
-        for axis in self.axis:
-            if random.random() < self.prob:
-                data = self.flip(data, axis)
-        return data
+def get_split(data, train_idx, val_idx):
+    train = list(np.array(data)[train_idx])
+    val = list(np.array(data)[val_idx])
+    return train, val
 
 
-class RandBalancedCrop(transforms.MapTransform):
-    def __init__(self, patch_size, oversampling, cascade=False):
-        self.patch_size = patch_size
-        self.oversampling = oversampling
-        self.cascade = cascade
+def get_nn_data_split(path: str, fold: int, num_folds: int):
+    kfold = KFold(n_splits=num_folds, shuffle=True, random_state=12345)
+    imgs = load_data(path, "*_x.npy")
+    lbls = load_data(path, "*_y.npy")
+    assert len(imgs) == len(lbls), f"Found {len(imgs)} volumes but {len(lbls)} corresponding masks"
 
-    def __call__(self, data):
-        image, label = data["image"], data["label"]
-        if random.random() < self.oversampling:
-            image, label, cords = self.rand_foreg_cropd(image, label)
+    train_idx, val_idx = list(kfold.split(imgs))[fold]
+    imgs_train, imgs_val = get_split(imgs, train_idx, val_idx)
+    lbls_train, lbls_val = get_split(lbls, train_idx, val_idx)
+    return imgs_train, imgs_val, lbls_train, lbls_val
+
+
+class SyntheticDataset(Dataset):
+    def __init__(self, channels_in=1, channels_out=3, shape=(128, 128, 128),
+                 device="cpu", layout="NCDHW", scalar=False):
+        shape = tuple(shape)
+        x_shape = (channels_in,) + shape if layout == "NCDHW" else shape + (channels_in,)
+        self.x = torch.rand((32, *x_shape), dtype=torch.float32, device=device, requires_grad=False)
+        if scalar:
+            self.y = torch.randint(low=0, high=channels_out - 1, size=(32, *shape), dtype=torch.int32,
+                                   device=device, requires_grad=False)
+            self.y = torch.unsqueeze(self.y, dim=1 if layout == "NCDHW" else -1)
         else:
-            image, label, cords = self._rand_crop(image, label)
-        data.update({"image": image, "label": label})
-        if self.cascade:
-            return data, cords
-        return data
+            y_shape = (channels_out,) + shape if layout == "NCDHW" else shape + (channels_out,)
+            self.y = torch.rand((32, *y_shape), dtype=torch.float32, device=device, requires_grad=False)
 
-    @staticmethod
-    def randrange(max_range):
-        return 0 if max_range == 0 else random.randrange(max_range)
+    def __len__(self):
+        return 64
 
-    def get_cords(self, cord, idx):
-        return cord[idx], cord[idx] + self.patch_size[idx]
+    def __getitem__(self, idx):
+        return self.x[idx % 32], self.y[idx % 32]
 
-    def _rand_crop(self, image, label):
-        ranges = [s - p for s, p in zip(image.shape[1:], self.patch_size)]
-        cord = [self.randrange(x) for x in ranges]
-        low_x, high_x = self.get_cords(cord, 0)
-        low_y, high_y = self.get_cords(cord, 1)
-        low_z, high_z = self.get_cords(cord, 2)
-        image = image[:, low_x:high_x, low_y:high_y, low_z:high_z]
-        label = label[:, low_x:high_x, low_y:high_y, low_z:high_z]
-        return image, label, [low_x, high_x, low_y, high_y, low_z, high_z]
 
-    def rand_foreg_cropd(self, image, label):
-        def adjust(foreg_slice, patch_size, label, idx):
-            diff = patch_size[idx - 1] - (foreg_slice[idx].stop - foreg_slice[idx].start)
-            sign = -1 if diff < 0 else 1
-            diff = abs(diff)
-            ladj = self.randrange(diff)
-            hadj = diff - ladj
-            low = max(0, foreg_slice[idx].start - sign * ladj)
-            high = min(label.shape[idx], foreg_slice[idx].stop + sign * hadj)
-            diff = patch_size[idx - 1] - (high - low)
-            if diff > 0 and low == 0:
-                high += diff
-            elif diff > 0:
-                low -= diff
-            return low, high
+def get_data_loaders(flags, num_shards, device_id):
+    if flags.loader == "synthetic":
+        dataset = SyntheticDataset(scalar=True, shape=flags.input_shape, layout=flags.layout)
+        train_dataloader = DataLoader(dataset,
+                                      batch_size=flags.batch_size,
+                                      shuffle=flags.benchmark is False,
+                                      num_workers=flags.num_workers,
+                                      pin_memory=True,
+                                      drop_last=True)
 
-        foreg_slices = ndimage.find_objects(label)
-        foreg_slices = [x for x in foreg_slices if x is not None]
-        if not foreg_slices:
-            return self._rand_crop(image, label)
-        foreg_slice = foreg_slices[random.randrange(len(foreg_slices))]
-        low_x, high_x = adjust(foreg_slice, self.patch_size, label, 1)
-        low_y, high_y = adjust(foreg_slice, self.patch_size, label, 2)
-        low_z, high_z = adjust(foreg_slice, self.patch_size, label, 3)
-        image = image[:, low_x:high_x, low_y:high_y, low_z:high_z]
-        label = label[:, low_x:high_x, low_y:high_y, low_z:high_z]
-        return image, label, [low_x, high_x, low_y, high_y, low_z, high_z]
+        val_dataloader = None
+
+    elif "dali" in flags.loader:
+        x_train, x_val, y_train, y_val = get_nn_data_split(flags.data_dir, flags.fold, flags.num_folds)
+        train_dataloader = get_dali_loader(flags, x_train, y_train, mode="train",
+                                           num_shards=num_shards, device_id=device_id)
+        val_dataloader = get_dali_loader(flags, x_val, y_val, mode="validation",
+                                         num_shards=num_shards, device_id=device_id)
+
+    else:
+        raise ValueError("Loader {} unknown.".format(flags.loader))
+
+    return train_dataloader, val_dataloader
