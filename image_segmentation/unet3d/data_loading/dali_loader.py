@@ -5,6 +5,7 @@ import nvidia.dali.types as types
 from nvidia.dali.pipeline import Pipeline
 from nvidia.dali.plugin.pytorch import DALIGenericIterator
 from nvidia.dali.plugin.pytorch import LastBatchPolicy
+import torch
 
 
 class BasicPipeline(Pipeline):
@@ -82,7 +83,13 @@ class BasicPipeline(Pipeline):
         return img, lbl
 
     def move_to_gpu(self, img, label):
-        return img.gpu(), label.gpu()
+        """
+        Determine if GPU/CUDA available. If yes, then move. If not, then keep on CPU
+        """
+        if torch.cuda.is_available():
+            return img.gpu(), label.gpu()
+        else:
+            return img, label
 
 
 class TrainNumpyPipeline(BasicPipeline):
