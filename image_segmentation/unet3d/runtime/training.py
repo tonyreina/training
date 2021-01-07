@@ -22,7 +22,15 @@ def get_optimizer(params, name: str, learning_rate: float, momentum: float):
 
 
 def train(flags, model, train_loader, val_loader, loss_fn, score_fn, callbacks, is_distributed):
-    device = torch.device("cuda")
+    
+    """
+    Detect if GPU/CUDA is available. If not, then fallback to CPU.
+    """
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
+        
     rank = get_rank()
     torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.deterministic = True
