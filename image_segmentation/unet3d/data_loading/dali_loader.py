@@ -82,7 +82,14 @@ class BasicPipeline(Pipeline):
         return img, lbl
 
     def move_to_gpu(self, img, label):
-        return img.gpu(), label.gpu()
+        """
+        Detect if GPU/CUDA is available. If not, then fallback to CPU.
+        """
+        if torch.cuda.is_available():
+            return img.gpu(), label.gpu()
+        else:
+            return img, label
+   
 
 
 class TrainNumpyPipeline(BasicPipeline):
