@@ -5,7 +5,7 @@ import nvidia.dali.types as types
 from nvidia.dali.pipeline import Pipeline
 from nvidia.dali.plugin.pytorch import DALIGenericIterator
 from nvidia.dali.plugin.pytorch import LastBatchPolicy
-
+import torch
 
 class BasicPipeline(Pipeline):
     def __init__(self, flags, batch_size, input_shape, device_id=0):
