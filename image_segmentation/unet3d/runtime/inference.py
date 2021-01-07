@@ -14,7 +14,13 @@ from runtime.setup import reduce_tensor, get_world_size, get_rank
 
 
 def evaluate(flags, model, loader, loss_fn, score_fn, epoch=0, is_distributed=False):
-    device = torch.device("cuda")
+    """
+    Detect if CUDA/GPU is available. If not, then fallback to CPU.
+    """
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
     rank = get_rank()
     world_size = get_world_size()
     model.to(device)
